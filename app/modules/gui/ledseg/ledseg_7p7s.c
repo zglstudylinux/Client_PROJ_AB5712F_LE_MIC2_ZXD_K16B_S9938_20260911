@@ -56,6 +56,13 @@ void ledseg_7p7s_scan(void)
     }
 
     ledseg_ajust(disp_seg);
+    //lib 的 ajust 在高频档(连接后196.6M)会启动 TMR1 消隐(26M晶振源, PR=500~900 →
+    //占空仅~2-3.5%)，数码管明显变暗且随内容/射频抖动闪烁；待机档(24M)不消隐为全亮。
+    //这里统一关掉消隐，使连接态亮度与待机一致。
+    if (TMR1CON != 0) {
+        TMR1CON = 0;
+        TMR1CPND = BIT(9);              //清溢出 pending，防止残留触发 timer1_isr 关屏
+    }
     ledseg_7p7s_set(disp_seg, com_cnt);
 }
 

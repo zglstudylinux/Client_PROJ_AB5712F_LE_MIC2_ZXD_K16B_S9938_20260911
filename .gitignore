@@ -1,0 +1,6 @@
+# Build artifacts
+app/projects/*/Output/
+
+# Code::Blocks user files
+*.depend
+*.layout

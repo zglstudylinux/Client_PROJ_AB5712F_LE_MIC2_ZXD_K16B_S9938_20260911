@@ -14,3 +14,17 @@ void timer1_isr(void)
 #endif
     }
 }
+
+AT(.com_text.timer)
+void timer4_isr(void)
+{
+    if (TMR4CON & BIT(9)) {
+        TMR4CPND = BIT(9);              //Clear Pending
+        TMR4CON = 0;                    //one-shot; ledseg_ajust() arms next slot
+#if (GUI_SELECT == GUI_LEDSEG_7P7S)
+        ledseg_7p7s_clr();
+#elif (GUI_SELECT == GUI_LEDSEG_6C6S)
+        ledseg_6c6s_clr();
+#endif
+    }
+}

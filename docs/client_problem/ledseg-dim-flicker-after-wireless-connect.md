@@ -5,8 +5,10 @@
 | 硬件 | AB5712F（K16B 板），发送端 emit（wireless_mic_emit）+ 接收端 adapter（wireless_adapter） |
 | SDK | 中科蓝讯 bt8930 硅族 SDK，`app/projects/microphone`（CONFIG_WIRELESS_LE_MIC 方案） |
 | 现象 | 发送端开机数码管亮度正常；与接收端建立无线连接后明显变暗，并持续闪烁；断开连接后恢复 |
-| 分支 | `branch_01` |
-| 结论 | 消隐是原厂按点亮段数均衡亮度的设计（占空约 2~3.5%），连接后正常生效，与待机态实测的全亮状态形成落差，观感为"变暗+闪烁"；修复为在每次扫描后强制关闭消隐，统一为全亮占空 |
+| 分支 | `branch_02` |
+| 原因结论 | 旧版原厂库把数码管消隐绑定到 TMR1。24MHz 待机档 TMR1 写入未锁存；无线连接后系统升至 196.608MHz，TMR1 在每个 COM 槽被成功武装并触发消隐，亮度骤降且消隐窗口随段数变化，形成“变暗+闪烁”。 |
+| 最终修复 | 采用原厂提供的新版 `libplatform.a`（MD5 `A038D0F43636BF4AE4E9847BB72AC040`）：原厂将 `ledseg_ajust()` 的 one-shot 消隐改用 TMR4。应用层仅接入其 `timer4_irq_init()`，并在 `timer4_isr()` 完成 one-shot 清屏；不再自行配置或改写 TMR1/TMR4 的初始化寄存器。 |
+| 验收状态 | 用户实机确认：待机、连接和断开后数码管均正常显示，无明显变暗或持续闪烁。 |
 
 ---
 
@@ -39,7 +41,8 @@ LED_USER_CONN
 | --- | --- | --- |
 | 1ms tick 中断 | `app/system/system.c` `usr_tmr1ms_isr()` | TMR0 跑固定 1MHz（PCLKSEL=110），每 1ms 调 `gui_scan()` |
 | COM 扫描 | `app/modules/gui/ledseg/ledseg_7p7s.c` `ledseg_7p7s_scan()` | 7 个 COM 轮流点亮，帧率 ≈ 1000/7 ≈ 143Hz |
-| 占空/消隐 | 闭源库 `ledseg_ajust()`（libplatform.a） | 配置 TMR1；`timer1_isr()`（`app/system/interrupt.c`）在 TMR1 溢出时调 `ledseg_7p7s_clr()` 关屏 |
+| 占空/消隐（旧库） | 闭源库 `ledseg_ajust()`（旧 `libplatform.a`） | 配置 TMR1；`timer1_isr()` 在 TMR1 溢出时调 `ledseg_7p7s_clr()` 关屏 |
+| 占空/消隐（当前） | 原厂新版 `ledseg_ajust()`（当前 `libplatform.a`） | 配置 TMR4；`timer4_isr()` 在 TMR4 溢出时调 `ledseg_7p7s_clr()` 关屏 |
 | 点亮 COM | `app/projects/microphone/port/port_ledseg.c` `ledseg_7p7s_set()` | GPIO 高驱动，先全关再点亮 |
 
 系统主频：开机基础主频 `SYS_CLK_SEL = SYS_24M`（`config_wireless_mic.h:24`）；无线连接成功回调里抬高（`app/modules/wireless/wireless_proc.c`，`sys_clk_req(INDEX_KARAOK, SYS_120M)` → `SYS_160M`，**实测 `SYS_160M` 档实际频率为 196.608MHz**）；断开后 `sys_clk_free(INDEX_KARAOK)` 回到 24M。
@@ -215,7 +218,31 @@ LEDSEG DBG: scan=36  arm=36  early=0 | buf=7e 48 73 76 4b 4f 25 | last seg=4b co
 - 待机：`buf` 七槽全非零（"2402"+图标确实在扫描缓冲中）且 195 次扫描 `arm=0`——**输入非零而 `s_bcnt` 判定/武装从未发生**；
 - 连接后：`arm=scan`（100% 武装），`pr` 在 0x172~0x384 随槽位内容跳变；
 - `early=0` 全程——`disp_en` 门控无影响；
-- `scan` 反汇编（xbs1 自定义指令实现，capstone 无法解码，位于 s_sys.o）——其行为与主频档关联的确切机理需原厂确认（另一候选为 TMR1 所在 xosc26m 域在待机档被门控，寄存器读写为总线默认值，同样与全部观测吻合）。
+- 本轮采样尚不能单独区分 `s_bcnt` 路径和 TMR1 寄存器可访问性，故继续进行了第 3.5 节的原厂消隐路径验证。
+
+### 3.5 原厂消隐路径验证（最终闭环）
+
+为避免修复代码停止 TMR1 后把 ISR 计数归零，诊断构建**只在测试时**保留了原厂 `ledseg_ajust()` 后的 TMR1 消隐流程；除增加计数外，不重配 TMR1、不改写 PR。实测：
+
+```text
+────── 待机（24MHz，亮度正常）──────
+LEDSEG_DIAG clk=24000000 scan=5000 lit=4935 bcnt0=0 bcntnz=4935 unarmed=4935 armed=0 tmr1isr=0 last=48/2/0/ffffffff
+LEDSEG_DIAG clk=24000000 scan=5000 lit=5000 bcnt0=0 bcntnz=5000 unarmed=5000 armed=0 tmr1isr=0 last=76/5/0/ffffffff
+
+────── 连接后（196.608MHz，变暗且闪烁）──────
+LEDSEG_DIAG clk=196608000 scan=5000 lit=5000 bcnt0=0 bcntnz=5000 unarmed=4756 armed=244 tmr1isr=243 last=4f/5/85/320
+LEDSEG_DIAG clk=196608000 scan=5000 lit=5000 bcnt0=0 bcntnz=5000 unarmed=0 armed=5000 tmr1isr=5000 last=7e/6/85/384
+LEDSEG_DIAG clk=196608000 scan=5000 lit=5000 bcnt0=0 bcntnz=5000 unarmed=0 armed=5000 tmr1isr=5000 last=73/5/85/320
+```
+
+这组数据给出确定结论：
+
+- 两档 `bcnt0=0`：与原厂 `ledseg_ajust()` 使用相同 `s_bcnt(disp_seg)` 和相同段码，排除“低频 `s_bcnt` 返回 0，因而没有执行武装分支”。
+- 24MHz 时，原厂写入后的 `TMR1CON=0`、`TMR1PR=0xFFFFFFFF`，且 `tmr1isr=0`；即写入没有在 TMR1 外设侧锁存，消隐没有启动。
+- 196.608MHz 稳定后，5000/5000 扫描均读到 `TMR1CON=0x85` 和有效 PR，且 `tmr1isr=5000`；每一个点亮槽都在原厂设定的窗口后被 `timer1_isr()` 清屏。
+- 连接瞬间的 `unarmed=4756 / armed=244` 是 5 秒统计窗口跨越切频时刻的过渡数据；其后的完整窗口才代表稳定高频状态。
+
+因此，已实证“连接后变暗”的直接机制和“低频不暗”的前置条件。手册没有公开 Clock Manager/CLKGAT 的位定义，故不能把低频写入未锁存进一步归因到某一具体门控位；但“低频档 TMR1 外设访问/写通路未就绪，高频档就绪”的现象已被实测确认。
 
 ---
 
@@ -224,66 +251,89 @@ LEDSEG DBG: scan=36  arm=36  early=0 | buf=7e 48 73 76 4b 4f 25 | last seg=4b co
 **确证的机制链**（诊断固件实测 + 运行时反汇编 + 原厂源码三方交叉验证）：
 
 1. 原厂 lib 的 `ledseg_ajust()`（已拿到源码，并与 app.bin 运行时反汇编、重定位符号表三方核对一致；`__riscv_save_0`/`__riscv_restore_0` 为 `-msave-restore` 编译选项的序言/尾声辅助函数）在每个扫描槽用 `s_bcnt()`（xbs1 自定义指令实现的位计数，位于 libplatform.a 的 s_sys.o）统计点亮段数，按 `ledseg_tbl` 查表设置 TMR1 消隐窗口（`TMR1CNT=0`、`TMR1PR=1000-查表值`、`TMR1CON=0x85`，时钟源 PCLKSEL=010=xosc26m 固定 26MHz）——**消隐是原厂的亮度控制设计，占空约 2~3.5%**。
-2. 诊断固件实测（每 5 秒统计一次，195 次扫描采样零例外）：
-   - **待机档（SYS_24M，未连接）**：`TMR1CON` 读回恒为 0、`TMR1PR` 读回恒为复位值 0xFFFFFFFF——对 TMR1 的写入**不生效**，消隐从未工作，数码管以 100% 占空全亮；
-   - **连接后（主频抬至 196.608MHz，即"160M"档实际频率）**：每次扫描 `TMR1CON=0x85`、`TMR1PR=370~900` 全部生效，消隐工作，占空骤降为 2~3.5%。
+2. 原厂消隐路径诊断固件实测（每 5 秒统计 5000 次扫描）：
+   - **待机档（SYS_24M，未连接）**：`bcnt0=0`，但 `TMR1CON` 恒为 0、`TMR1PR` 恒为复位值 0xFFFFFFFF、`tmr1isr=0`。原厂分支具备执行条件，然而 TMR1 写入**没有锁存**，消隐从未工作，数码管以 100% 占空全亮；
+   - **连接后（主频抬至 196.608MHz，即"160M"档实际频率）**：稳定窗口内每次扫描均为 `TMR1CON=0x85`、`TMR1PR=370~900`、`tmr1isr=1`，消隐工作，占空骤降为 2~3.5%。
 3. 用户感知的"变暗+闪烁"= 待机全亮（消隐未生效）与连接后原厂设计亮度（消隐生效）之间的落差，叠加 PR 随显示内容在 370~900 间跳变（约 2.4 倍亮度波动）与射频抖动。
 4. 同时排除的候选：RF 中断挤占扫描（tick 中断进入延迟实测 max 4~54µs，连接后反而更小）；消隐窗口随主频缩短（TMR1 时钟源为固定 26M 晶振）；显示内容缺失（`ledseg_cb.buf` 七槽镜像恒为 "2402" 内容）。
 
-**待机档 TMR1 写入不生效的芯片级原因**待原厂最终确认（两个候选均与实测吻合：xosc26m 时钟域在待机档被门控导致寄存器读写为总线默认值；或 `s_bcnt` 所用 xbs1 自定义指令在低档位返回 0 使武装分支未执行），对本项目的修复方案无影响。
+**待机档 TMR1 写入不生效的芯片级原因**仍需原厂最终确认。`s_bcnt=0` 已被实测排除；仅剩的证据支持方向是低频工作配置下 TMR1 的外设时钟域、寄存器总线或其写使能尚未就绪，导致读回总线默认值。手册未提供 Clock Manager/CLKGAT 位定义、TMR1 外设门控条件与 `sys_clk_set_do()` 实现，不能在没有原厂资料的情况下再指定到具体门控位。
 
 > 排查过程中被证据修正过的推测：①"TMR1 跑系统主频域、抬频后窗口缩短"（手册证实时钟源为固定 26M 晶振）；②"lib 按主频档位门控消隐"（原厂源码无门控）；③"lib 版本与源码不一致"（反汇编中的两次"调用"实为 `-msave-restore` 的序言/尾声辅助函数）。
 > 第一版修复（读-改-写 TMR1PR 按主频补偿）失败的机理也已闭环：待机档 TMR1PR 读回的是总线默认值 0xFFFFFFFF，按比例回写垃圾值，连接档时钟域激活后定时器行为异常引发中断风暴，设备被 WDT 复位。
 
+原厂最终将这条消隐路径改到 TMR4，且用户实机验证正常。该结果确认问题的工程边界是“旧库的 TMR1 消隐路径与待机/无线切频工作状态不兼容”，而不是屏幕供电、RF 抢占扫描或应用显示内容问题。由于公开用户手册未给出旧 TMR1 在 24MHz 档未锁存的内部时钟/总线门控条件，本记录不把它进一步断言为某一个具体硬件门控位；最终以原厂 TMR4 实现作为可维护的修复依据。
+
 ---
 
-## 5. 修复方案（最终保留的代码）
+## 5. 最终修复：采用原厂 TMR4 消隐实现
 
-位置：`app/modules/gui/ledseg/ledseg_7p7s.c`，`ledseg_7p7s_scan()` 内，`ledseg_ajust()` 之后：
+用户从原厂取得新的 `libplatform.a` 后，已替换工程中的
+`app/libs/bt8930/libplatform.a`。本次库文件 MD5 为
+`A038D0F43636BF4AE4E9847BB72AC040`，导出了新增的
+`timer4_irq_init()`；该库中的 `ledseg_ajust()` 已将 one-shot 消隐从 TMR1
+迁移到 TMR4（原厂实现使用 `PCLKSEL=6`）。这一步完全采用原厂提供的库和实现，应用层不重写定时器初始化、不推测寄存器位含义。
+
+应用层只有两项配套接入：
+
+1. `app/modules/gui/gui.c`：7P7S/6C6S 显示初始化时调用原厂库的 `timer4_irq_init()`，替代旧库的 `timer1_irq_init()`。
+2. `app/system/interrupt.c`：新增 `timer4_isr()`。ISR 仅遵循原厂 one-shot 使用方式：确认 pending、清 TMR4 pending、停止当前 one-shot，然后调用对应的 `ledseg_*_clr()` 清屏。原 `timer1_isr()` 保留，避免影响其他可能的 TMR1 使用者，但当前数码管路径不再依赖它。
 
 ```c
-ledseg_ajust(disp_seg);
-//原厂 lib 源码：ajust 在点亮段数>0 时启动 TMR1 消隐（PR=1000-按段数查表，
-//窗口约 14~35µs / 1ms，占空仅 ~2-3.5%，用于按段数均衡亮度）。实测连接后
-//消隐生效，整屏明显变暗且随内容/射频抖动闪烁。这里统一关闭消隐，保持全亮。
-if (TMR1CON != 0) {
-    TMR1CON = 0;
-    TMR1CPND = BIT(9);              //清溢出 pending，防止残留触发 timer1_isr 关屏
+// gui.c：初始化交给原厂新版库
+timer4_irq_init();
+
+// interrupt.c：TMR4 one-shot 到期后消隐当前 COM 槽
+if (TMR4CON & BIT(9)) {
+    TMR4CPND = BIT(9);
+    TMR4CON = 0;
+    ledseg_7p7s_clr();
 }
-ledseg_7p7s_set(disp_seg, com_cnt);
 ```
 
-要点：
+`ledseg_7p7s.c` 恢复为原始扫描顺序：`ledseg_ajust(disp_seg)` 后立即
+`ledseg_7p7s_set(disp_seg, com_cnt)`；其中不再含任何 TMR1 “强制关闭”、PR 比例补偿或诊断代码。
 
-- 只有无条件的寄存器写（CON=0 + 清 pending），**不做任何 PR 读-改-写**（第一版崩溃的根源）；
-- 必须放在 `ledseg_ajust()` 之后——lib 每次扫描都会重新配置 TMR1，放在之前会被覆盖；
-- **这是有意偏离原厂设计**：原厂按段数均衡亮度（占空 2~3.5%），本修复统一为全亮（100% 占空），显示平均电流相应提高约一个数量级——与本项目待机态的历史行为一致，经整机实测接受；
-- 修复位于 emit/adapter 共用的扫描代码，两端同时生效。
+### 已撤销/放弃的路线
 
-### 曾考虑但放弃的方案
-
-| 方案 | 放弃原因 |
+| 路线 | 结论与原因 |
 | --- | --- |
-| 按主频比例放大 TMR1PR（提高连接态占空） | 需要读-改-写 PR，第一版实测引发中断风暴/WDT 复位 |
-| 按原厂设计保留消隐、两档统一 ~2-3.5% 占空 | 整屏明显偏暗且占空随内容跳变的闪烁感仍在，不符合需求 |
-| 取消连接后的抬主频 | 196.6M 是无线链路处理（LC3S 编码、算法）所需，动它影响音频 |
+| 按主频比例读-改-写 TMR1PR | 已撤销。待机档读到 `0xFFFFFFFF` 的无效值，回写后造成异常定时器行为和 WDT 复位。 |
+| `ledseg_ajust()` 后强制关闭 TMR1 | 仅为临时观感规避，改变原厂的亮度均衡策略、提升平均电流，且不能解决 TMR1 路径本身在切频后的不确定性；已删除。 |
+| 手工重配 TMR1 的 PCLKSEL/PR | 不采纳。该做法需要猜测时钟/门控语义，与“优先使用原厂实现”的约束不符。 |
+| 取消无线连接后的升频 | 不采纳。196.608MHz 档用于无线音频处理，修改会扩大影响面。 |
 
 ---
 
 ## 6. 验证结果
 
-修复后发送端实测（数码管连接后与待机亮度一致、不闪）：
+### 实机功能验收
 
-```text
-────── 待机 ──────
-LEDSEG DBG: clk=24000000, TMR1CON=0 TMR1PR=ffffffff, tick_lat max=34 avg=10 us
-────── 连接后（lib 仍尝试开消隐，被修复代码关闭）──────
-WIRELESS_CONNECTED,0 1
-LEDSEG DBG: clk=196608000, TMR1CON=85 TMR1PR=320, tick_lat max=34 avg=5 us
-LEDSEG DBG: clk=196608000, TMR1CON=85 TMR1PR=1f4, tick_lat max=4 avg=1 us
+- 用户已用替换后的原厂库和本节 App 配套修改烧录验证：发送端在待机、无线连接成功和断开后三种状态均正常显示；连接后不再出现明显亮度下降或持续闪烁。
+- 连接日志仍正常进入 `WIRELESS_CONNECTED`，没有再出现早期 PR 补偿实验导致的 WDT 循环复位。
+- 原先用于定位的 `LEDSEG_*_DIAG` 计数与调试打印均已删除，正式固件不会持续输出诊断日志。
+
+### 构建验收
+
+使用工程的官方 Code::Blocks 配置等价命令行构建脚本执行：
+
+```powershell
+cd app/projects/microphone
+powershell -ExecutionPolicy Bypass -NoProfile -File .\build.ps1 -Rebuild
 ```
 
-`TMR1CON=85 TMR1PR=320` 是采样点（在关闭动作之前）的值，说明 lib 仍在尝试启动消隐、被本修复关闭——符合预期。
+该命令会先执行 `Output/bin/prebuild.bat`，生成 `res.bin`、`xcfg.bin`、`res.h`、`xcfg.h`、`effect.c` 和 `effect.h`，再编译链接、由 `postbuild.bat` 生成下载镜像。完整构建在本次提交前已通过；最终产物位于 `app/projects/microphone/Output/bin/`。
+
+### 复现资源
+
+此前根目录 `.gitignore` 忽略了整个 `app/projects/*/Output/`，使新 clone 缺少 `app.cbp` 的前/后置构建脚本和资源输入。本提交将强制纳入下列**构建输入和生成资源**，但不纳入可重新生成的对象文件、map、`app.rv32`、`app.bin` 或 `app.dcf`：
+
+- `Output/bin/prebuild.bat`、`postbuild.bat`、`app.xm`、`download.xm`；
+- xmaker 输入和结果：`res.xm`、`xcfg.xm`、`effect.bsln`、`effect.bts`、`res.bin`、`xcfg.bin`、`res.h`、`xcfg.h`、`effect.c`、`effect.h`；
+- 打包依赖：`header.bin`、`unpack.bin`、`updater.bin`；
+- 原始语音/效果资源 `Output/bin/res/` 和 xmaker 设置/方案文件 `Output/bin/Settings/`。
+
+因此，clone 后具备本项目所需的厂商 RV32 工具链和 xmaker 时，可直接运行上述命令完成从零构建。
 
 ---
 

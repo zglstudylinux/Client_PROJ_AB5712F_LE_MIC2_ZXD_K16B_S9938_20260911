@@ -1,0 +1,6 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <workspace firmWare="">
+    <project openSeq="Last" type="Effect" path=".\effect.bts" />
+  </workspace>
+</configuration>

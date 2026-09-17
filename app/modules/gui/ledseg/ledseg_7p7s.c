@@ -56,13 +56,6 @@ void ledseg_7p7s_scan(void)
     }
 
     ledseg_ajust(disp_seg);
-    //原厂 lib 源码：ajust 在点亮段数>0 时启动 TMR1 消隐（PR=1000-按段数查表，
-    //窗口约 14~35µs / 1ms，占空仅 ~2-3.5%，用于按段数均衡亮度）。实测连接后
-    //消隐生效，整屏明显变暗且随内容/射频抖动闪烁。这里统一关闭消隐，保持全亮。
-    if (TMR1CON != 0) {
-        TMR1CON = 0;
-        TMR1CPND = BIT(9);              //清溢出 pending，防止残留触发 timer1_isr 关屏
-    }
     ledseg_7p7s_set(disp_seg, com_cnt);
 }
 

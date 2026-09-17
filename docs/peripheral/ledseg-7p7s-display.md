@@ -77,21 +77,23 @@
 
 时钟源由手册《ab571x_usermanual.pdf》Register 4-1 定义（bits[3:1] PCLKSEL）：`000=system clock`、`010=xosc26m_clk`、`110=tmr_inc_cr(1M 分频)` 等。本工程 lib 选择 **010 = 26M 晶振（固定频率）**，即 `CON = 0x85`（TMREN | PCLKSEL=010 | IRQ_EN）——消隐窗口的长短与系统主频无关。
 
-> **原厂同构实现参考**（原厂其他芯片 SDK 的 `ledseg_ajust` 源码，用 TMR4；本芯片闭源 lib 用 TMR1，机器码逐条对应）：
+> **原厂 lib 实现**（原厂提供的本芯片 `ledseg_ajust` 源码，与闭源库反汇编结果逐条吻合）：
 >
 > ```c
 > AT(.com_text.ledseg)
 > void ledseg_ajust(uint disp_seg)
 > {
->     uint seg_num = s_bcnt(disp_seg);          //统计本槽点亮段数
+>     uint seg_num = s_bcnt(disp_seg);
 >     if (seg_num > 0) {
 >         //根据需要点亮的SEG数，设定不同的点亮时间。 seg_num越小，点亮时间越短
->         TMR4CNT  = 0;
->         TMR4PR   = 1000 - ledseg_tbl[seg_num-1];   //段数越少 → 消隐窗口越长 → 占空越低
->         TMR4CON  = BIT(7) | BIT(2) | BIT(0);       //本芯片手册: IRQ_EN | PCLKSEL=010(xosc26m) | TMREN
+>         TMR1CNT  = 0;
+>         TMR1PR   = 1000 - ledseg_tbl[seg_num-1];
+>         TMR1CON  = BIT(7) | BIT(2) | BIT(0);   //timer1 interrupt en, timer1 counter mode
 >     }
 > }
 > ```
+>
+> 即：段数越少 → 查表值越大 → PR 越小 → 点亮窗口越短，从而按段数均衡亮度。注意 `BIT(2)` 按本芯片手册 Register 4-1 属于 PCLKSEL（bits[3:1]=010=xosc26m_clk），消隐窗口与系统主频无关。
 
 ---
 
@@ -170,9 +172,8 @@ sequenceDiagram
 | TMR0 | 固定 1MHz（PCLKSEL=110，26M 分频） | 否 | 1ms tick → COM 扫描节拍 |
 | TMR1 | 26M 晶振（PCLKSEL=010） | 否 | 槽内消隐窗口 → 亮度 |
 
-即**扫描节拍与亮度占空在硬件上都不依赖系统主频**。但闭源库 `ledseg_ajust()` 会按主频档位改变消隐的启停策略：待机档（24M）不启动消隐（100% 占空、全亮），连接后高频档（`SYS_160M` 档，实测 196.608MHz）启动消隐（占空仅 2~3.5%、明显变暗）。这带来过一个实际故障，完整排查见
-[数码管无线连接后变暗闪烁排错](../client_problem/ledseg-dim-flicker-after-wireless-connect.md)，
-修复为在 `ledseg_ajust()` 之后统一关闭消隐（`ledseg_7p7s.c`）。
+即**扫描节拍与亮度占空在硬件上都不依赖系统主频**。按原厂 lib 源码，`ledseg_ajust()` 在点亮段数 >0 时即启动消隐（按段数均衡亮度，占空约 2~3.5%，与主频无关）；本项目实测发现连接后消隐生效、待机档未武装（占空 100%），两档亮度落差导致"连接后变暗闪烁"的观感，修复为在 `ledseg_ajust()` 之后统一关闭消隐（`ledseg_7p7s.c`），完整过程见
+[数码管无线连接后变暗闪烁排错](../client_problem/ledseg-dim-flicker-after-wireless-connect.md)。
 
 ### 2.5 显示内容层（应用侧怎么用）
 

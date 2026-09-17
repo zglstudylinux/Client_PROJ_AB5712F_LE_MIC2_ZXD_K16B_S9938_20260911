@@ -2,6 +2,7 @@
 #include "gui.h"
 
 #if (GUI_SELECT != GUI_NO)
+void timer4_irq_init(void);     //原厂更新后的 libplatform.a
 gui_box_t box_cb;
 
 void gui_init(void)
@@ -9,7 +10,7 @@ void gui_init(void)
     memset(&box_cb, 0, sizeof(box_cb));
 
 #if ((GUI_SELECT == GUI_LEDSEG_7P7S)||(GUI_SELECT == GUI_LEDSEG_6C6S))
-    timer1_irq_init();
+    timer4_irq_init();
 #endif
 
 #if (GUI_SELECT & DISPLAY_LEDSEG)

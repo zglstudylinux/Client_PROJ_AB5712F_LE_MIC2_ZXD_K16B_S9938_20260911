@@ -1,5 +1,15 @@
-# Build artifacts
-app/projects/*/Output/
+# 构建产物（prebuild/postbuild 每次构建重新生成，不提交）
+app/projects/*/Output/bin/app.rv32
+app/projects/*/Output/bin/app.bin
+app/projects/*/Output/bin/app.dcf
+app/projects/*/Output/bin/appxm.o
+app/projects/*/Output/bin/app.lst
+app/projects/*/Output/bin/map.txt
+app/projects/*/Output/bin/res.bin
+app/projects/*/Output/bin/res.h
+app/projects/*/Output/bin/xcfg.bin
+app/projects/*/Output/bin/xcfg.h
+app/projects/*/Output/obj/
 
 # Code::Blocks user files
 *.depend
